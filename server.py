@@ -2,25 +2,26 @@ import os
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from telethon import TelegramClient
-from telethon.sessions import StringSession
 
 app = FastAPI()
 
-# Render environment variables se values uthayega
-API_ID = int(
-    os.getenv("API_ID", "0")
-)  # Apne Render env variables me API_ID daalna na bhulein
-API_HASH = os.getenv("API_HASH", "")
-SESSION_STRING = os.getenv("SESSION_STRING", "")
-CHANNEL = "xeonmoviessite"
+# Render environment variables se values uthayenge
+API_ID = int(os.getenv("API_ID", "0"))  # Apna API_ID dalein
+API_HASH = os.getenv("API_HASH", "")  # Apna API_HASH dalein
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")  # Apna Bot Token dalein
 
-# Telegram Client Initialize karein
-client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+# Private channel ki numeric ID (-100 lagakar likhna zaroori hai)
+# Jaise t.me/c/4308155230/27 hai, toh ID -1004308155230 hogi
+CHANNEL = -1004308155230
+
+# Bot Token ke sath client initialize karein (Session file ki zaroorat nahi)
+client = TelegramClient("bot_session", API_ID, API_HASH)
 
 
 @app.on_event("startup")
 async def startup_event():
-  await client.start()
+  # Bot token ke sath start karein
+  await client.start(bot_token=BOT_TOKEN)
 
 
 @app.on_event("shutdown")
@@ -28,10 +29,13 @@ async def shutdown_event():
   await client.disconnect()
 
 
-# --- UptimeRobot ke liye Root Route (Yeh 200 OK dega) ---
+# --- UptimeRobot ke liye Root Route ---
 @app.get("/")
 def home():
-  return {"status": "Active", "message": "Telegram Streaming Proxy is Running!"}
+  return {
+      "status": "Active",
+      "message": "Telegram Bot Streaming Proxy is Running!",
+  }
 
 
 # --- Video Streaming Route ---
@@ -40,7 +44,9 @@ async def stream_video(message_id: int, request: Request):
   try:
     message = await client.get_messages(CHANNEL, ids=message_id)
     if not message or not message.media:
-      raise HTTPException(status_code=404, detail="Video not found!")
+      raise HTTPException(
+          status_code=404, detail="Video not found or bot has no access!"
+      )
 
     file_size = message.file.size
     mime_type = message.file.mime_type or "video/mp4"
@@ -59,7 +65,7 @@ async def stream_video(message_id: int, request: Request):
       except ValueError:
         pass
 
-    # Speed behtar karne ke liye 2MB ka chunk size
+    # 2MB ka chunk size streaming ke liye
     chunk_size = 1024 * 1024 * 2
     total_size = (end - start) + 1
 

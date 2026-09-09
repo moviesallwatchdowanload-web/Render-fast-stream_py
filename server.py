@@ -16,17 +16,17 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 CHANNEL = -1004308155230
 
-# 8 MB Telegram read chunks
-CHUNK_SIZE = 8 * 1024 * 1024
+# Telethon's practical MTProto request size
+REQUEST_SIZE = 512 * 1024
 
 client = TelegramClient(
     "bot_session",
     API_ID,
     API_HASH,
     connection_retries=None,
-    retry_delay=2,
+    retry_delay=1,
+    auto_reconnect=True,
 )
-
 
 # =========================
 # START / STOP
@@ -51,6 +51,7 @@ async def home():
     return {
         "status": "Active",
         "stream": "Telegram → FastAPI",
+        "range": "enabled"
     }
 
 
@@ -58,18 +59,23 @@ async def home():
 # RANGE PARSER
 # =========================
 
-def parse_range(range_header: str, file_size: int):
+def parse_range(range_header: str | None, file_size: int):
 
     if not range_header:
         return 0, file_size - 1, False
 
-    match = re.match(
+    match = re.fullmatch(
         r"bytes=(\d*)-(\d*)",
-        range_header
+        range_header.strip()
     )
 
     if not match:
-        return 0, file_size - 1, False
+        raise HTTPException(
+            status_code=416,
+            headers={
+                "Content-Range": f"bytes */{file_size}"
+            }
+        )
 
     start_str, end_str = match.groups()
 
@@ -78,7 +84,12 @@ def parse_range(range_header: str, file_size: int):
         length = int(end_str)
 
         if length <= 0:
-            raise HTTPException(status_code=416)
+            raise HTTPException(
+                status_code=416,
+                headers={
+                    "Content-Range": f"bytes */{file_size}"
+                }
+            )
 
         start = max(file_size - length, 0)
         end = file_size - 1
@@ -99,6 +110,14 @@ def parse_range(range_header: str, file_size: int):
         else:
             end = file_size - 1
 
+    if start > end:
+        raise HTTPException(
+            status_code=416,
+            headers={
+                "Content-Range": f"bytes */{file_size}"
+            }
+        )
+
     return start, end, True
 
 
@@ -113,8 +132,10 @@ async def stream_video(
 ):
 
     try:
+        # -------------------------
+        # GET TELEGRAM MESSAGE
+        # -------------------------
 
-        # Get Telegram message
         message = await client.get_messages(
             CHANNEL,
             ids=message_id
@@ -146,7 +167,7 @@ async def stream_video(
         )
 
         # -------------------------
-        # RANGE
+        # RANGE / SEEK
         # -------------------------
 
         range_header = request.headers.get("range")
@@ -170,23 +191,26 @@ async def stream_video(
                     message.media,
                     offset=start,
                     limit=content_length,
-                    chunk_size=CHUNK_SIZE,
-                    request_size=CHUNK_SIZE,
+                    request_size=REQUEST_SIZE,
+                    chunk_size=REQUEST_SIZE,
                 ):
 
                     if await request.is_disconnected():
-                        break
+                        return
 
                     yield chunk
 
-            except Exception as e:
+            except Exception as error:
 
                 print(
-                    f"STREAM ERROR [{message_id}]: {e}"
+                    f"[STREAM ERROR] "
+                    f"message={message_id} "
+                    f"offset={start} "
+                    f"error={error}"
                 )
 
         # -------------------------
-        # HEADERS
+        # RESPONSE HEADERS
         # -------------------------
 
         headers = {
@@ -194,14 +218,17 @@ async def stream_video(
             "Content-Length": str(content_length),
             "Content-Type": mime_type,
 
-            # Helps video players cache small pieces
+            # Browser caching hint
             "Cache-Control": "public, max-age=3600",
 
             # CORS
             "Access-Control-Allow-Origin": "*",
 
-            # Useful for debugging
-            "X-Stream-Source": "telegram",
+            # Helps keep connection alive
+            "Connection": "keep-alive",
+
+            # Debug
+            "X-Stream-Source": "telegram"
         }
 
         if is_range:
@@ -220,16 +247,18 @@ async def stream_video(
             file_generator(),
             status_code=status_code,
             headers=headers,
-            media_type=mime_type,
+            media_type=mime_type
         )
 
     except HTTPException:
         raise
 
-    except Exception as e:
+    except Exception as error:
 
         print(
-            f"STREAM REQUEST ERROR [{message_id}]: {e}"
+            f"[REQUEST ERROR] "
+            f"message={message_id} "
+            f"error={error}"
         )
 
         raise HTTPException(
